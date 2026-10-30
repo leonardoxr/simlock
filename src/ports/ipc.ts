@@ -4,6 +4,7 @@ export type IpcErrorCode =
   | "address-in-use"
   | "connection-refused"
   | "endpoint-not-found"
+  | "connection-timeout"
   | "unknown";
 
 export class IpcError extends Error {
@@ -15,6 +16,14 @@ export class IpcError extends Error {
     super(message, { cause });
     this.name = "IpcError";
   }
+}
+
+/** why: only a refused or missing endpoint proves nothing listens there; any other failure cannot prove it. */
+export function isEndpointAbsent(error: unknown): boolean {
+  return (
+    error instanceof IpcError &&
+    (error.code === "connection-refused" || error.code === "endpoint-not-found")
+  );
 }
 
 export interface IpcConnection {
@@ -46,20 +55,24 @@ const CLOSE_GRACE_MS = 2_000;
 export interface NodeIpcTransportOptions {
   readonly connectTimeoutMs?: number;
   readonly closeGraceMs?: number;
+  /** why: a test needs a socket that never connects, which no real endpoint gives reliably. */
+  readonly socketFor?: (endpoint: string) => Socket;
 }
 
-/** Node's Unix-domain socket adapter. Kept at the infrastructure boundary. */
+/** why: one adapter serves both endpoint kinds, a Unix-domain socket path and a Windows named pipe. */
 export class NodeIpcTransport implements IpcConnector, IpcListenerFactory {
   readonly #connectTimeoutMs: number;
   readonly #closeGraceMs: number;
+  readonly #socketFor: (endpoint: string) => Socket;
 
   constructor(options: NodeIpcTransportOptions = {}) {
     this.#connectTimeoutMs = options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
     this.#closeGraceMs = options.closeGraceMs ?? CLOSE_GRACE_MS;
+    this.#socketFor = options.socketFor ?? ((endpoint) => connect(endpoint));
   }
 
   async connect(endpoint: string): Promise<IpcConnection> {
-    const socket = connect(endpoint);
+    const socket = this.#socketFor(endpoint);
     let timer: NodeJS.Timeout | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
@@ -78,7 +91,7 @@ export class NodeIpcTransport implements IpcConnector, IpcListenerFactory {
           socket.off("error", onError);
           reject(
             new IpcError(
-              "unknown",
+              "connection-timeout",
               `Timed out connecting to ${endpoint} after ${this.#connectTimeoutMs} ms`,
               undefined,
             ),

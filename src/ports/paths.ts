@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 
 import type { Filesystem } from "./filesystem.js";
 
 /**
- * why: Resolves simlock's data directory (config.json, state.db, daemon.sock, daemon.log,
+ * why: Resolves simlock's data directory (config.json, state.db, daemon.sock (a named pipe instead on Windows, so no file), daemon.log,
  * and the device roots under `devices/`). `SIMLOCK_HOME` overrides the default
  * `~/.simlock` -- used by tests that need an isolated data directory per daemon instance,
  * and by anyone running multiple independent simlock installs on one machine.
@@ -77,7 +77,8 @@ export function resolveDaemonSocketPath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (platform === "win32") return windowsPipeName(dataDirectory);
-  const socketPath = join(dataDirectory, "daemon.sock");
+  // why: past the pipe, the platform is POSIX, so the path is too, whatever host computes it.
+  const socketPath = posix.join(dataDirectory, "daemon.sock");
   const maxLength = maxSocketPathLength(platform);
   if (Buffer.byteLength(socketPath) > maxLength) {
     throw new SocketPathTooLongError(socketPath, maxLength);
