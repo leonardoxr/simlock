@@ -15,6 +15,7 @@ import {
   WindowsHostLoadProbe,
   type CpuTimes,
   type HostLoadCounters,
+  type ProcessRunner,
 } from "./index.js";
 
 vi.mock("node:os", async (importOriginal) => {
@@ -879,8 +880,8 @@ describe("WindowsHostLoadProbe", () => {
   });
 
   it.each([
-    ["PowerShell exits non-zero", { code: 1, stdout: "" }],
-    ["PowerShell times out", { code: null, stdout: "" }],
+    ["PowerShell exits non-zero", { code: 1, stdout: "100" }],
+    ["PowerShell times out", { code: null, stdout: "100" }],
     ["the answer is not a whole number", { stdout: "n/a" }],
   ] as const)("leaves memory out, and still reads CPU and disk, when %s", async (_why, answer) => {
     const counters = await windowsProbe(pageFileRunner(answer)).read();
@@ -890,7 +891,7 @@ describe("WindowsHostLoadProbe", () => {
     expect(counters.disk).toEqual({ freeBytes: 5_000, totalBytes: 5_000 });
   });
 
-  it("reports no swap used on a machine with no page file", async () => {
+  it("reports no swap used when the page-file query answers 0", async () => {
     const counters = await windowsProbe(pageFileRunner({ stdout: "0\r\n" })).read();
 
     expect(counters.memory?.swapUsedBytes).toBe(0);
@@ -902,5 +903,50 @@ describe("WindowsHostLoadProbe", () => {
     }).read();
 
     expect(counters.memory).toBeUndefined();
+  });
+});
+
+// why: what a failed or empty page-file query prints is PowerShell's behaviour, which only the real
+// query shows; the runner rewrites the query to make it fail or find no page file.
+describe.runIf(process.platform === "win32")("WindowsHostLoadProbe on Windows", () => {
+  function realProbe(rewrite: (arg: string) => string = (arg) => arg): WindowsHostLoadProbe {
+    const node = new NodeProcessRunner();
+    const processRunner: ProcessRunner = {
+      run: (command, args, options) => node.run(command, args.map(rewrite), options),
+      spawn: (command, args, options) => node.spawn(command, args.map(rewrite), options),
+      spawnStreaming: (command, args, options) =>
+        node.spawnStreaming(command, args.map(rewrite), options),
+    };
+    return new WindowsHostLoadProbe({
+      cpus: () => [{ times: CORE }],
+      dataDirectory: tmpdir(),
+      filesystem: new NodeFilesystem(),
+      freemem: () => 1024 * MIB,
+      now: () => 0,
+      processRunner,
+      totalmem: () => 2048 * MIB,
+    });
+  }
+
+  it("reads swap from the real page-file query as whole MiB", async () => {
+    const counters = await realProbe().read();
+
+    expect(Number.isInteger((counters.memory?.swapUsedBytes ?? -1) / MIB)).toBe(true);
+  });
+
+  it("leaves memory out when the page-file query itself fails, rather than reporting no swap", async () => {
+    const counters = await realProbe((arg) =>
+      arg.replace("Win32_PageFileUsage", "Win32_NoSuchClass"),
+    ).read();
+
+    expect(counters.memory).toBeUndefined();
+  });
+
+  it("reports no swap used when the query finds no page file", async () => {
+    const counters = await realProbe((arg) =>
+      arg.replace("Get-CimInstance Win32_PageFileUsage", "@()"),
+    ).read();
+
+    expect(counters.memory?.swapUsedBytes).toBe(0);
   });
 });
